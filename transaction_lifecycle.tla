@@ -31,6 +31,10 @@ TypeOK ==
 					\* We abstract away the actual list of requests and their side effects on stores
 					\* because the goal of this spec is to model the concurrency of the transaction lifecycle only.
 					requests  : BOOLEAN,
+					\* A counter of requests that have been processed.
+					\* Used to verify the invariant that a transaction must satisfy CanStart
+					\* before it processes any requests.
+					processed_requests : Nat,
 					state     : TxStates ]]
 
 IsCreated(tx) == transactions[tx].state # "None"
@@ -99,6 +103,11 @@ CanStart(tx) ==
 				/\ Overlaps(other, tx)
 		ELSE \* versionchange transactions can always start.
 			TRUE
+
+\* Invariant: If a transaction has processed requests, it must have been able to start.
+ProcessedRequestsImpliesStarted ==
+	\A tx \in Transactions:
+		(transactions[tx].processed_requests > 0) => CanStart(tx)
 -----------------------------------------------------------------------------------------
 
 DefaultTx ==
@@ -106,6 +115,7 @@ DefaultTx ==
 		mode      |-> "readonly",
 		stores    |-> {},
 		requests  |-> FALSE,
+		processed_requests |-> 0,
 		state     |-> "None" ]
 
 DefaultConn ==
@@ -169,6 +179,7 @@ CreateUpgradeTransaction(c) ==
 						mode      |-> "versionchange",
 						stores    |-> { s \in Stores : stores[s] },
 						requests  |-> FALSE,
+						processed_requests |-> 0,
 						state     |-> "Active"]
 			]
 	/\ connections' = [connections EXCEPT
@@ -206,6 +217,7 @@ CreateTransaction(c, mode, scope) ==
 						mode      |-> mode,
 							stores    |-> scope,
 								requests  |-> FALSE,
+								processed_requests |-> 0,
 								state     |-> "Active"]
 			]
 	/\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
@@ -236,6 +248,7 @@ ProcessRequest(tx) ==
 	/\ transactions[tx].requests
 	/\ transactions' = [transactions EXCEPT
 				![tx].requests = FALSE,
+				![tx].processed_requests = transactions[tx].processed_requests + 1,
 				![tx].state = "Active"
 			]
 	/\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
