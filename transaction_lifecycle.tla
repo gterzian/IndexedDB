@@ -31,10 +31,10 @@ TypeOK ==
          \* We abstract away the actual list of requests and their side effects on stores
          \* because the goal of this spec is to model the concurrency of the transaction lifecycle only.
          requests  : BOOLEAN,
-         \* A counter of requests that have been processed.
+         \* A flag indicating if any requests have been processed.
          \* Used to verify the invariant that a transaction must satisfy CanStart
          \* before it processes any requests.
-         processed_requests: Nat,
+         processed_requests: BOOLEAN,
          state: TxStates ]]
 
 IsCreated(tx) == transactions[tx].state # "None"
@@ -107,7 +107,7 @@ CanStart(tx) ==
 \* Invariant: If a transaction has processed requests, it must have been able to start.
 ProcessedRequestsImpliesStarted ==
     \A tx \in Transactions:
-        (transactions[tx].processed_requests > 0) => CanStart(tx)
+        (transactions[tx].processed_requests) => CanStart(tx)
 -----------------------------------------------------------------------------------------
 
 DefaultTx ==
@@ -115,7 +115,7 @@ DefaultTx ==
         mode      |-> "readonly",
         stores    |-> {},
         requests  |-> FALSE,
-        processed_requests |-> 0,
+        processed_requests |-> FALSE,
         state     |-> "None" ]
 
 DefaultConn ==
@@ -178,7 +178,7 @@ CreateUpgradeTransaction(c) ==
                         mode      |-> "versionchange",
                         stores    |-> { s \in Stores : stores[s] },
                         requests  |-> FALSE,
-                        processed_requests |-> 0,
+                        processed_requests |-> FALSE,
                         state     |-> "Active"]
             ]
     /\ connections' = [connections EXCEPT
@@ -219,7 +219,7 @@ CreateTransaction(c, mode, scope) ==
                         mode      |-> mode,
                             stores    |-> scope,
                                 requests  |-> FALSE,
-                                processed_requests |-> 0,
+                                processed_requests |-> FALSE,
                                 state     |-> "Active"]
             ]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
@@ -236,8 +236,9 @@ AddRequest(tx) ==
 \*
 \* Set request’s processed flag to true.
 \*
-\* Note: just modelling the presence of pending requests,
-\* and counting processed requests(for the can start invariant).
+\* Note: just modelling the presence of pending requests
+\* and the fact that at least one was processed
+\* so that we can check the "can start" invariant.
 ProcessRequest(tx) ==
     /\ CanStart(tx)
     /\ ConnOpen(transactions[tx].conn)
@@ -245,7 +246,7 @@ ProcessRequest(tx) ==
     /\ transactions[tx].requests
     /\ transactions' = [transactions EXCEPT
                 ![tx].requests = FALSE,
-                ![tx].processed_requests = transactions[tx].processed_requests + 1,
+                ![tx].processed_requests = TRUE,
                 ![tx].state = "Active"
             ]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
