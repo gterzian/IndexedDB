@@ -2,13 +2,13 @@
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS Stores, Connections, Transactions, Versions
-VARIABLES transactions, stores, pending_stores, connections, dbVersion, connection_queue
+VARIABLES transactions, stores, pending_stores, connections, dbVersion, connection_queue, next_tx_order
 \* TLA+ model of the transaction lifecycle and scheduling rules from:
 \* - <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \* - <https://w3c.github.io/IndexedDB/#transaction-scheduling>
 
 \* Note: by using only a single dbVersion, we do not model multiple databases. 
-Vars == << transactions, stores, pending_stores, connections, dbVersion, connection_queue >>
+Vars == << transactions, stores, pending_stores, connections, dbVersion, connection_queue, next_tx_order >>
 
 Modes == {"readonly", "readwrite", "versionchange"}
 TxStates == {"None", "Active", "Inactive", "Committing", "Finished"}
@@ -23,6 +23,7 @@ TypeOK ==
          requestedVersion: Versions,
          closed: BOOLEAN ]]
     /\ connection_queue \in Seq(Connections)
+    /\ next_tx_order \in Nat
     /\ transactions \in [Transactions ->
         [conn: Connections,
          mode: Modes,
@@ -35,7 +36,8 @@ TypeOK ==
          \* Used to verify the invariant that a transaction must satisfy CanStart
          \* before it processes any requests.
          processed_requests: BOOLEAN,
-         state: TxStates ]]
+         state: TxStates,
+         creation_time: Nat ]]
 
 IsCreated(tx) == transactions[tx].state # "None"
 
@@ -43,13 +45,10 @@ Live(tx) == IsCreated(tx) /\ transactions[tx].state # "Finished"
 
 Overlaps(tx1, tx2) == (transactions[tx1].stores \cap transactions[tx2].stores) # {}
 
-\* Since we allocate transaction IDs in increasing order (using Min),
-\* the ID itself serves as a logical clock for creation time.
-CreatedBefore(tx1, tx2) == tx1 < tx2
+\* Transactions are ordered by their creation time.
+CreatedBefore(tx1, tx2) == transactions[tx1].creation_time < transactions[tx2].creation_time
 
-Min(S) == CHOOSE x \in S : \A y \in S : x <= y
-
-Symmetry == Permutations(Stores) \cup Permutations(Connections)
+Symmetry == Permutations(Stores) \cup Permutations(Connections) \cup Permutations(Transactions)
 
 ConnOpen(c) == connections[c].open
 
@@ -116,7 +115,8 @@ DefaultTx ==
         stores    |-> {},
         requests  |-> FALSE,
         processed_requests |-> FALSE,
-        state     |-> "None" ]
+        state     |-> "None",
+        creation_time |-> 0 ]
 
 DefaultConn ==
     [ open            |-> FALSE,
@@ -131,6 +131,7 @@ Init ==
     /\ connections = [c \in Connections |-> DefaultConn]
     /\ dbVersion = 0
     /\ connection_queue = <<>>
+    /\ next_tx_order = 0
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 \* Wait until all previous requests in queue have been processed.
@@ -145,7 +146,7 @@ StartOpenConnection(c, requestedVersion) ==
                     closed          |-> FALSE]
         ]
     /\ connection_queue' = Append(connection_queue, c)
-    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion>>
+    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 FinishOpenConnection(c) ==
@@ -157,7 +158,7 @@ FinishOpenConnection(c) ==
     /\ ~HasLiveUpgradeTx(c)
     /\ connections' = [connections EXCEPT ![c].open = TRUE, ![c].pendingUpgrade = FALSE]
     /\ connection_queue' = Tail(connection_queue)
-    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion>>
+    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 \* Wait until all connections in openConnections are closed.
@@ -165,7 +166,7 @@ FinishOpenConnection(c) ==
 CreateUpgradeTransaction(c) ==
     LET 
 	    freeTxs == { t \in Transactions : ~IsCreated(t) }
-		tx == Min(freeTxs)
+		tx == CHOOSE t \in freeTxs : TRUE
 	IN
     /\ Len(connection_queue) > 0
 	/\ ~ConnOpen(c)
@@ -179,13 +180,15 @@ CreateUpgradeTransaction(c) ==
                         stores    |-> { s \in Stores : stores[s] },
                         requests  |-> FALSE,
                         processed_requests |-> FALSE,
-                        state     |-> "Active"]
+                        state     |-> "Active",
+                        creation_time |-> next_tx_order]
             ]
     /\ connections' = [connections EXCEPT
                 ![c].open = TRUE
             ]
     /\ dbVersion' = connections[c].requestedVersion
     /\ pending_stores' = stores
+    /\ next_tx_order' = next_tx_order + 1
     /\ UNCHANGED <<stores, connection_queue>>
 
 \* <https://w3c.github.io/IndexedDB/#close-a-database-connection>
@@ -202,7 +205,7 @@ CloseConnection(c) ==
             IF transactions[tx].conn = c 
             THEN DefaultTx 
             ELSE transactions[tx]]
-    /\ UNCHANGED <<stores, pending_stores, dbVersion, connection_queue>>
+    /\ UNCHANGED <<stores, pending_stores, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-transaction>
 \* If a live upgrade transaction is associated with the connection, throw 
@@ -213,15 +216,17 @@ CreateTransaction(c, mode, scope) ==
     /\ ConnOpen(c)
     /\ ~HasLiveUpgradeTx(c)
     /\ \A s \in scope: stores[s]
-    /\ LET tx == Min(freeTxs) IN
+    /\ LET tx == CHOOSE t \in freeTxs : TRUE IN
        /\ transactions' = [transactions EXCEPT
                 ![tx] = [conn     |-> c,
                         mode      |-> mode,
                             stores    |-> scope,
                                 requests  |-> FALSE,
                                 processed_requests |-> FALSE,
-                                state     |-> "Active"]
+                                state     |-> "Active",
+                                creation_time |-> next_tx_order]
             ]
+    /\ next_tx_order' = next_tx_order + 1
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
 
 \* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
@@ -230,7 +235,7 @@ AddRequest(tx) ==
     /\ transactions[tx].state = "Active"
     /\ ~transactions[tx].requests
     /\ transactions' = [transactions EXCEPT ![tx].requests = TRUE]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
 \*
@@ -249,7 +254,7 @@ ProcessRequest(tx) ==
                 ![tx].processed_requests = TRUE,
                 ![tx].state = "Active"
             ]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \*
@@ -263,7 +268,7 @@ ProcessRequest(tx) ==
 Deactivate(tx) ==
     /\ transactions[tx].state = "Active"
     /\ transactions' = [transactions EXCEPT ![tx].state = "Inactive"]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \*
@@ -274,7 +279,7 @@ AutoCommit(tx) ==
     /\ transactions[tx].state = "Inactive"
     /\ ~transactions[tx].requests
     /\ transactions' = [transactions EXCEPT ![tx].state = "Committing"]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \*
@@ -284,7 +289,7 @@ AutoCommit(tx) ==
 Commit(tx) ==
     /\ transactions[tx].state \notin {"None", "Committing", "Finished"}
     /\ transactions' = [transactions EXCEPT ![tx].state = "Committing"]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \* "When a transaction is committed or aborted, its state is
@@ -303,7 +308,7 @@ CommitDone(tx) ==
                 /\ UNCHANGED pending_stores
             ELSE
                 /\ UNCHANGED <<stores, pending_stores>>
-    /\ UNCHANGED <<connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<connections, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \*
@@ -318,7 +323,7 @@ Abort(tx) ==
                 /\ UNCHANGED stores
             ELSE
                 /\ UNCHANGED <<stores, pending_stores>>
-    /\ UNCHANGED <<connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<connections, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#upgrade-transaction-construct>
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-createobjectstore>
@@ -332,7 +337,7 @@ CreateStore(tx, s) ==
     /\ transactions[tx].state = "Active"
     /\ ~pending_stores[s]
     /\ pending_stores' = [pending_stores EXCEPT ![s] = TRUE]
-    /\ UNCHANGED <<transactions, stores, connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<transactions, stores, connections, dbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#upgrade-transaction-construct>
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-deleteobjectstore>
@@ -345,7 +350,7 @@ DeleteStore(tx, s) ==
     /\ transactions[tx].state = "Active"
     /\ pending_stores[s]
     /\ pending_stores' = [pending_stores EXCEPT ![s] = FALSE]
-    /\ UNCHANGED <<transactions, stores, connections, dbVersion, connection_queue>>
+    /\ UNCHANGED <<transactions, stores, connections, dbVersion, connection_queue, next_tx_order>>
 
 \* When all connections went through their open and close cyle: infinite stuttering.
 AllClosed ==
