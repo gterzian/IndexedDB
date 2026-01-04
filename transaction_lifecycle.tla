@@ -133,6 +133,7 @@ Init ==
     /\ connection_queue = <<>>
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
+\* Wait until all previous requests in queue have been processed.
 StartOpenConnection(c, requestedVersion) ==
     /\ dbVersion <= requestedVersion
     /\ connections[c] = DefaultConn
@@ -147,15 +148,14 @@ StartOpenConnection(c, requestedVersion) ==
     /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion>>
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
-\*
-\* Note: A non-upgrade open request can be processed once it reaches the head
-\* of the queue.
 FinishOpenConnection(c) ==
     /\ Len(connection_queue) > 0
     /\ c = Head(connection_queue)
-    /\ ~ConnPendingUpgrade(c)
     /\ connections[c].requestedVersion = dbVersion
-    /\ connections' = [connections EXCEPT ![c].open = TRUE]
+	\* <https://w3c.github.io/IndexedDB/#upgrade-a-database>
+	\* Wait for transaction to finish.
+    /\ ~HasLiveUpgradeTx(c)
+    /\ connections' = [connections EXCEPT ![c].open = TRUE, ![c].pendingUpgrade = FALSE]
     /\ connection_queue' = Tail(connection_queue)
     /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion>>
 
@@ -294,18 +294,11 @@ CommitDone(tx) ==
     /\ transactions' = [transactions EXCEPT ![tx] = [DefaultTx EXCEPT !.state = "Finished"]]
     /\ IF transactions[tx].mode = "versionchange"
             THEN
-                /\ connections' = [connections EXCEPT ![transactions[tx].conn].pendingUpgrade = FALSE]
-                \* Dequeue the corresponding open request once the upgrade tx finishes.
-                \* This models "Wait for transaction to finish" in the upgrade algorithm:
-                \* <https://w3c.github.io/IndexedDB/#upgrade-a-database>
-                /\ connection_queue' = Tail(connection_queue)
                 /\ stores' = pending_stores
                 /\ UNCHANGED pending_stores
             ELSE
-                /\ connections' = connections
-                /\ connection_queue' = connection_queue
                 /\ UNCHANGED <<stores, pending_stores>>
-    /\ UNCHANGED <<dbVersion>>
+    /\ UNCHANGED <<connections, dbVersion, connection_queue>>
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \*
@@ -316,18 +309,11 @@ Abort(tx) ==
     /\ transactions' = [transactions EXCEPT ![tx] = [DefaultTx EXCEPT !.state = "Finished"]]
     /\ IF transactions[tx].mode = "versionchange"
             THEN
-                /\ connections' = [connections EXCEPT ![transactions[tx].conn].pendingUpgrade = FALSE]
-                \* Dequeue the corresponding open request once the upgrade tx finishes.
-                \* This models "Wait for transaction to finish" in the upgrade algorithm:
-                \* <https://w3c.github.io/IndexedDB/#upgrade-a-database>
-                /\ connection_queue' = Tail(connection_queue)
                 /\ pending_stores' = stores
                 /\ UNCHANGED stores
             ELSE
-                /\ connections' = connections
-                /\ connection_queue' = connection_queue
                 /\ UNCHANGED <<stores, pending_stores>>
-    /\ UNCHANGED <<dbVersion>>
+    /\ UNCHANGED <<connections, dbVersion, connection_queue>>
 
 \* <https://w3c.github.io/IndexedDB/#upgrade-transaction-construct>
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-createobjectstore>
