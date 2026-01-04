@@ -66,6 +66,23 @@ HasLiveUpgradeTx(c) ==
         /\ transactions[tx].conn = c
         /\ transactions[tx].mode = "versionchange"
 
+\* <https://w3c.github.io/IndexedDB/#transaction-scheduling>.
+CanStart(tx) ==
+    LET m == transactions[tx].mode IN
+        IF m = "readonly" THEN
+            ~\E other \in (Transactions \ {tx}):
+                /\ Live(other)
+                /\ transactions[other].mode = "readwrite"
+                /\ CreatedBefore(other, tx)
+                /\ Overlaps(other, tx)
+        ELSE IF m = "readwrite" THEN
+            ~\E other \in (Transactions \ {tx}):
+                /\ Live(other)
+                /\ CreatedBefore(other, tx)
+                /\ Overlaps(other, tx)
+        ELSE \* versionchange transactions can always start.
+            TRUE
+
 \* Safety property: A versionchange transaction being live excludes any other live transaction.
 UpgradeTxExcludesOtherLiveTxs ==
     \A tx1 \in Transactions:
@@ -86,22 +103,11 @@ ActiveUpgradeTxImpliesExclusiveConn ==
                 /\ Head(connection_queue) = transactions[tx].conn
                 /\ \A c \in Connections: ConnOpen(c) => c = transactions[tx].conn
 
-\* <https://w3c.github.io/IndexedDB/#transaction-scheduling>.
-CanStart(tx) ==
-    LET m == transactions[tx].mode IN
-        IF m = "readonly" THEN
-            ~\E other \in (Transactions \ {tx}):
-                /\ Live(other)
-                /\ transactions[other].mode = "readwrite"
-                /\ CreatedBefore(other, tx)
-                /\ Overlaps(other, tx)
-        ELSE IF m = "readwrite" THEN
-            ~\E other \in (Transactions \ {tx}):
-                /\ Live(other)
-                /\ CreatedBefore(other, tx)
-                /\ Overlaps(other, tx)
-        ELSE \* versionchange transactions can always start.
-            TRUE
+\* Invariant: An active transaction implies that the version of the connection is that of the db.
+ActiveTransactionImpliesCorrectVersion ==
+    \A tx \in Transactions:
+        (transactions[tx].state = "Active") =>
+            (connections[transactions[tx].conn].requestedVersion = dbVersion)
 
 \* Invariant: If a transaction has processed requests, it must have been able to start.
 ProcessedRequestsImpliesStarted ==
@@ -136,7 +142,6 @@ Init ==
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 \* Wait until all previous requests in queue have been processed.
 StartOpenConnection(c, requestedVersion) ==
-    /\ dbVersion <= requestedVersion
     /\ connections[c] = DefaultConn
     /\ ~connections[c].closed
     /\ connections' = [connections EXCEPT
@@ -157,6 +162,17 @@ FinishOpenConnection(c) ==
 	\* Wait for transaction to finish.
     /\ ~HasLiveUpgradeTx(c)
     /\ connections' = [connections EXCEPT ![c].open = TRUE, ![c].pendingUpgrade = FALSE]
+    /\ connection_queue' = Tail(connection_queue)
+    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, next_tx_order>>
+
+\* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
+\* If db’s version is greater than version, 
+\* abort these steps.
+RejectOpenConnection(c) ==
+    /\ Len(connection_queue) > 0
+    /\ c = Head(connection_queue)
+    /\ connections[c].requestedVersion < dbVersion
+    /\ connections' = [connections EXCEPT ![c] = DefaultConn]
     /\ connection_queue' = Tail(connection_queue)
     /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, next_tx_order>>
 
@@ -360,6 +376,7 @@ AllClosed ==
 Next ==
     \/ \E c \in Connections, v \in Versions: StartOpenConnection(c, v)
     \/ \E c \in Connections: FinishOpenConnection(c)
+    \/ \E c \in Connections: RejectOpenConnection(c)
     \/ \E c \in Connections: CloseConnection(c)
     \/ \E c \in Connections: CreateUpgradeTransaction(c)
     \/ \E c \in Connections, m \in {"readonly", "readwrite"}, scope \in SUBSET Stores:
