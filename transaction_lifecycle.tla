@@ -59,7 +59,7 @@ TxForConn(c) == { tx \in Transactions : Live(tx) /\ transactions[tx].conn = c }
 
 AllTxFinishedForConn(c) ==
     \A tx \in Transactions:
-        (transactions[tx].conn = c) => (transactions[tx].state \in {"None", "Finished"})
+        (transactions[tx].conn = c) => (transactions[tx].state = "Finished")
 
 HasLiveUpgradeTx(c) ==
     \E tx \in Transactions:
@@ -133,7 +133,7 @@ Init ==
     /\ connection_queue = <<>>
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
-OpenConnection(c, requestedVersion) ==
+StartOpenConnection(c, requestedVersion) ==
     /\ dbVersion <= requestedVersion
     /\ connections[c] = DefaultConn
     /\ ~connections[c].closed
@@ -154,27 +154,26 @@ FinishOpenConnection(c) ==
     /\ Len(connection_queue) > 0
     /\ c = Head(connection_queue)
     /\ ~ConnPendingUpgrade(c)
-    /\ ~ConnOpen(c)
     /\ connections[c].requestedVersion = dbVersion
     /\ connections' = [connections EXCEPT ![c].open = TRUE]
     /\ connection_queue' = Tail(connection_queue)
     /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion>>
 
-\* <https://w3c.github.io/IndexedDB/#upgrade-transaction-construct>
-\* When all other connections are closed, and this connection is at the head of queue,
-\* create and start the ugrade transaction.
-\* The connection is removed from the queue when the transaction is finished.
-\* See `Abort` and `CommitDone`.
+\* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
+\* Wait until all connections in openConnections are closed.
+\* Run upgrade a database using connection, version and request.
 CreateUpgradeTransaction(c) ==
-    LET freeTxs == { t \in Transactions : ~IsCreated(t) } IN
+    LET 
+	    freeTxs == { t \in Transactions : ~IsCreated(t) }
+		tx == Min(freeTxs)
+	IN
     /\ Len(connection_queue) > 0
+	/\ ~ConnOpen(c)
     /\ c = Head(connection_queue)
     /\ ConnPendingUpgrade(c)
-    /\ ~ConnOpen(c)
     /\ \A other \in (Connections \ {c}): ~ConnOpen(other)
     /\ freeTxs # {}
-    /\ LET tx == Min(freeTxs) IN
-       /\ transactions' = [transactions EXCEPT
+    /\ transactions' = [transactions EXCEPT
                 ![tx] = [conn     |-> c,
                         mode      |-> "versionchange",
                         stores    |-> { s \in Stores : stores[s] },
@@ -193,8 +192,6 @@ CreateUpgradeTransaction(c) ==
 \*
 \* "Wait for all transactions created using connection to complete.
 \* Once they are complete, connection is closed."
-\*
-\* Note: forced close is not modeled right now.
 CloseConnection(c) ==
     /\ ConnOpen(c)
     /\ AllTxFinishedForConn(c)
@@ -204,11 +201,12 @@ CloseConnection(c) ==
     /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, connection_queue>>
 
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-transaction>
+\* If a live upgrade transaction is associated with the connection, throw 
+\* If this’s close pending flag is true, then throw.
 CreateTransaction(c, mode, scope) ==
     LET freeTxs == { t \in Transactions : ~IsCreated(t) } IN
     /\ freeTxs # {}
     /\ ConnOpen(c)
-    \* If a live upgrade transaction is associated with the connection, throw 
     /\ ~HasLiveUpgradeTx(c)
     /\ \A s \in scope: stores[s]
     /\ LET tx == Min(freeTxs) IN
@@ -222,26 +220,21 @@ CreateTransaction(c, mode, scope) ==
             ]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
 
-\* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
-\*
-\* "New requests can be made against the transaction when it is
-\* in [active]" and "The implementation must allow requests to be placed
-\* against the transaction whenever it is active".
+\* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
+\* Assert: transaction’s state is active.
 AddRequest(tx) ==
-    /\ Live(tx)
-    /\ ConnOpen(transactions[tx].conn)
     /\ transactions[tx].state = "Active"
     /\ ~transactions[tx].requests
     /\ transactions' = [transactions EXCEPT ![tx].requests = TRUE]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
 
-\* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
+\* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
 \*
-\* "Requests must be executed in the order in which
-\* they were made" and "While the event is being dispatched, the transaction
-\* state is set to active".
+\* Set request’s processed flag to true.
+\*
+\* Note: just modelling the presence of pending requests,
+\* and counting processed requests(for the can start invariant).
 ProcessRequest(tx) ==
-    /\ Live(tx)
     /\ CanStart(tx)
     /\ ConnOpen(transactions[tx].conn)
     /\ transactions[tx].state \in {"Active", "Inactive"}
@@ -263,7 +256,6 @@ ProcessRequest(tx) ==
 \* steps to make it easier to model adding any number of requests
 \* while the transaction is active.
 Deactivate(tx) ==
-    /\ Live(tx)
     /\ transactions[tx].state = "Active"
     /\ transactions' = [transactions EXCEPT ![tx].state = "Inactive"]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
@@ -274,7 +266,6 @@ Deactivate(tx) ==
 \* when all requests placed against the transaction have completed...
 \* and no new requests have been placed against the transaction".
 AutoCommit(tx) ==
-    /\ Live(tx)
     /\ transactions[tx].state = "Inactive"
     /\ ~transactions[tx].requests
     /\ transactions' = [transactions EXCEPT ![tx].state = "Committing"]
@@ -286,22 +277,19 @@ AutoCommit(tx) ==
 \* transaction/commit" and "When committing, the transaction state is set to
 \* committing".
 Commit(tx) ==
-    /\ IsCreated(tx)
     /\ transactions[tx].state \notin {"None", "Committing", "Finished"}
     /\ transactions' = [transactions EXCEPT ![tx].state = "Committing"]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, connection_queue>>
 
+\* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
+\* "When a transaction is committed or aborted, its state is
+\* set to finished".
+\*
+\* Note: The commit/abort logic is only applied to store operations (CreateStore/DeleteStore)
+\* for now. We do not model data operations or their side effects/rollback, as it would
+\* make the spec significantly more complicated without adding much value to the
+\* transaction lifecycle concurrency model.
 CommitDone(tx) ==
-    \* Spec: Transaction lifecycle.
-    \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
-    \*
-    \* "When a transaction is committed or aborted, its state is
-    \* set to finished".
-    \*
-    \* Note: The commit/abort logic is only applied to store operations (CreateStore/DeleteStore)
-    \* for now. We do not model data operations or their side effects/rollback, as it would
-    \* make the spec significantly more complicated without adding much value to the
-    \* transaction lifecycle concurrency model.
     /\ transactions[tx].state = "Committing"
     /\ transactions' = [transactions EXCEPT ![tx] = [DefaultTx EXCEPT !.state = "Finished"]]
     /\ IF transactions[tx].mode = "versionchange"
@@ -324,7 +312,6 @@ CommitDone(tx) ==
 \* "A transaction can be aborted at any time before it is
 \* finished".
 Abort(tx) ==
-    /\ IsCreated(tx)
     /\ transactions[tx].state \notin {"None", "Finished"}
     /\ transactions' = [transactions EXCEPT ![tx] = [DefaultTx EXCEPT !.state = "Finished"]]
     /\ IF transactions[tx].mode = "versionchange"
@@ -349,9 +336,7 @@ Abort(tx) ==
 \* InvalidStateError if not called within an upgrade transaction" and require
 \* the upgrade transaction to be active.
 CreateStore(tx, s) ==
-    /\ Live(tx)
     /\ CanStart(tx)
-    /\ ConnOpen(transactions[tx].conn)
     /\ transactions[tx].mode = "versionchange"
     /\ transactions[tx].state = "Active"
     /\ ~pending_stores[s]
@@ -364,9 +349,7 @@ CreateStore(tx, s) ==
 \* deleteObjectStore "Throws InvalidStateError if not called within an upgrade
 \* transaction" and requires the upgrade transaction to be active.
 DeleteStore(tx, s) ==
-    /\ Live(tx)
     /\ CanStart(tx)
-    /\ ConnOpen(transactions[tx].conn)
     /\ transactions[tx].mode = "versionchange"
     /\ transactions[tx].state = "Active"
     /\ pending_stores[s]
@@ -379,7 +362,7 @@ AllDone ==
     /\ UNCHANGED Vars
 
 Next ==
-    \/ \E c \in Connections, v \in Versions: OpenConnection(c, v)
+    \/ \E c \in Connections, v \in Versions: StartOpenConnection(c, v)
     \/ \E c \in Connections: FinishOpenConnection(c)
     \/ \E c \in Connections: CloseConnection(c)
     \/ \E c \in Connections: CreateUpgradeTransaction(c)
