@@ -198,7 +198,11 @@ CloseConnection(c) ==
     /\ connections' = [connections EXCEPT 
             ![c].open = FALSE,
             ![c].closed = TRUE]
-    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, connection_queue>>
+    /\ transactions' = [tx \in Transactions |-> 
+            IF transactions[tx].conn = c 
+            THEN DefaultTx 
+            ELSE transactions[tx]]
+    /\ UNCHANGED <<stores, pending_stores, dbVersion, connection_queue>>
 
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-transaction>
 \* If a live upgrade transaction is associated with the connection, throw 
@@ -291,7 +295,7 @@ Commit(tx) ==
 \* transaction lifecycle concurrency model.
 CommitDone(tx) ==
     /\ transactions[tx].state = "Committing"
-    /\ transactions' = [transactions EXCEPT ![tx] = [DefaultTx EXCEPT !.state = "Finished"]]
+    /\ transactions' = [transactions EXCEPT ![tx].state = "Finished"]
     /\ IF transactions[tx].mode = "versionchange"
             THEN
                 /\ stores' = pending_stores
@@ -306,7 +310,7 @@ CommitDone(tx) ==
 \* finished".
 Abort(tx) ==
     /\ transactions[tx].state \notin {"None", "Finished"}
-    /\ transactions' = [transactions EXCEPT ![tx] = [DefaultTx EXCEPT !.state = "Finished"]]
+    /\ transactions' = [transactions EXCEPT ![tx].state = "Finished"]
     /\ IF transactions[tx].mode = "versionchange"
             THEN
                 /\ pending_stores' = stores
@@ -342,9 +346,9 @@ DeleteStore(tx, s) ==
     /\ pending_stores' = [pending_stores EXCEPT ![s] = FALSE]
     /\ UNCHANGED <<transactions, stores, connections, dbVersion, connection_queue>>
 
-\* When everything is done, allow infinite stuttering.
-AllDone ==
-    /\ \A tx \in Transactions: transactions[tx].state \in {"None", "Finished"}
+\* When all connections went through their open and close cyle: infinite stuttering.
+AllClosed ==
+    /\ \A c \in Connections: connections[c].closed
     /\ UNCHANGED Vars
 
 Next ==
@@ -363,7 +367,7 @@ Next ==
              \/ CommitDone(tx)
              \/ Abort(tx)
              \/ \E s \in Stores: (CreateStore(tx, s) \/ DeleteStore(tx, s)))
-    \/ AllDone
+    \/ AllClosed
 
 Spec == Init /\ [][Next]_Vars
 
