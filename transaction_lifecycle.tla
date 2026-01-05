@@ -40,7 +40,7 @@ HasLiveUpgradeTx(c) ==
         /\ transactions[tx].conn = c
         /\ transactions[tx].mode = "versionchange"
 
-\* <https://w3c.github.io/IndexedDB/#transaction-scheduling>.
+\* <https://w3c.github.io/IndexedDB/#transaction-start>
 CanStart(tx) ==
     LET m == transactions[tx].mode IN
         IF m = "readonly" THEN
@@ -76,13 +76,7 @@ TypeOK ==
         [conn: Connections,
          mode: Modes,
          stores: SUBSET Stores,
-         \* We model requests as a simple boolean flag indicating pending work.
-         \* We abstract away the actual list of requests and their side effects on stores
-         \* because the goal of this spec is to model the concurrency of the transaction lifecycle only.
          requests  : Nat,
-         \* A flag indicating if any requests have been processed.
-         \* Used to verify the invariant that a transaction must satisfy CanStart
-         \* before it processes any requests.
          processed_requests: Nat,
          handled_requests: Nat,
          state: TxStates,
@@ -275,10 +269,6 @@ CreateTransaction(c, mode, scope) ==
 \* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
 \*
 \* Set request’s processed flag to true.
-\*
-\* Note: just modelling the presence of pending requests
-\* and the fact that at least one was processed
-\* so that we can check the "can start" invariant.
 ProcessRequest(tx) ==
     /\ CanStart(tx)
     /\ ConnOpen(transactions[tx].conn)
@@ -404,6 +394,7 @@ DeleteStore(tx, s) ==
     /\ UNCHANGED <<transactions, stores, connections, dbVersion, pendingDbVersion, connection_queue, next_tx_order>>
 
 \* When all connections went through their open and close cyle: infinite stuttering.
+\* This is a way to avoid deadlock while bounding the spec.
 AllClosed ==
     /\ \A c \in Connections: connections[c].closed
     /\ UNCHANGED Vars
