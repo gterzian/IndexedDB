@@ -149,7 +149,6 @@ Init ==
     /\ next_tx_order = 0
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
-\* Wait until all previous requests in queue have been processed.
 StartOpenConnection(c, requestedVersion) ==
     /\ connections[c] = DefaultConn
     /\ ~connections[c].closed
@@ -166,6 +165,7 @@ StartOpenConnection(c, requestedVersion) ==
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 FinishOpenConnection(c) ==
     /\ Len(connection_queue) > 0
+    \* Wait until all previous requests in queue have been processed.
     /\ c = Head(connection_queue)
     /\ (connections[c].requestedVersion = dbVersion \/ connections[c].closed)
 	\* <https://w3c.github.io/IndexedDB/#upgrade-a-database>
@@ -184,6 +184,7 @@ FinishOpenConnection(c) ==
 \* abort these steps.
 RejectOpenConnection(c) ==
     /\ Len(connection_queue) > 0
+    \* Wait until all previous requests in queue have been processed.
     /\ c = Head(connection_queue)
     /\ connections[c].requestedVersion < dbVersion
     /\ connections' = [connections EXCEPT ![c] = DefaultConn]
@@ -200,6 +201,7 @@ CreateUpgradeTransaction(c) ==
 	IN
     /\ Len(connection_queue) > 0
 	/\ ~ConnOpen(c)
+    \* Wait until all previous requests in queue have been processed.
     /\ c = Head(connection_queue)
     /\ connections[c].requestedVersion > dbVersion
     /\ \A other \in (Connections \ {c}): ~ConnOpen(other)
@@ -253,7 +255,7 @@ StartCloseConnection(c, forced) ==
 \*
 \* "Wait for all transactions created using connection to complete.
 \* Once they are complete, connection is closed."
-CloseConnection(c) ==
+FinishCloseConnection(c) ==
     /\ connections[c].close_pending
     /\ AllTxFinishedForConn(c)
     /\ connections' = [connections EXCEPT 
@@ -421,7 +423,7 @@ Next ==
     \/ \E c \in Connections: FinishOpenConnection(c)
     \/ \E c \in Connections: RejectOpenConnection(c)
     \/ \E c \in Connections, forced \in BOOLEAN: StartCloseConnection(c, forced)
-    \/ \E c \in Connections: CloseConnection(c)
+    \/ \E c \in Connections: FinishCloseConnection(c)
     \/ \E c \in Connections: CreateUpgradeTransaction(c)
     \/ \E c \in Connections, m \in {"readonly", "readwrite"}, scope \in SUBSET Stores:
             CreateTransaction(c, m, scope)
