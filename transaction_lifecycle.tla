@@ -162,6 +162,7 @@ Init ==
 StartOpenConnection(c, requestedVersion) ==
     /\ connections[c] = DefaultConn
     /\ ~connections[c].closed
+    /\ Len(connection_queue) < Cardinality(Connections)
     /\ connections' = [connections EXCEPT
             ![c] = [open            |-> FALSE,
                     pendingUpgrade  |-> (requestedVersion > dbVersion),
