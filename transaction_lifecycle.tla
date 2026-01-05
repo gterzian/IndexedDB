@@ -1,7 +1,7 @@
 ------------------------------ MODULE transaction_lifecycle ------------------------------
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
-CONSTANTS Stores, Connections, Transactions, Versions
+CONSTANTS Stores, Connections, Transactions, Versions, MaxRequests
 VARIABLES transactions, stores, pending_stores, connections, dbVersion, pendingDbVersion, connection_queue, next_tx_order
 \* TLA+ model of the transaction lifecycle and scheduling rules from:
 \* - <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
@@ -79,11 +79,12 @@ TypeOK ==
          \* We model requests as a simple boolean flag indicating pending work.
          \* We abstract away the actual list of requests and their side effects on stores
          \* because the goal of this spec is to model the concurrency of the transaction lifecycle only.
-         requests  : BOOLEAN,
+         requests  : Nat,
          \* A flag indicating if any requests have been processed.
          \* Used to verify the invariant that a transaction must satisfy CanStart
          \* before it processes any requests.
-         processed_requests: BOOLEAN,
+         processed_requests: Nat,
+         handled_requests: Nat,
          state: TxStates,
          creation_time: Nat ]]
 
@@ -119,15 +120,15 @@ ActiveTransactionImpliesCorrectVersion ==
 \* Invariant: If a transaction has processed requests, it must have been able to start.
 ProcessedRequestsImpliesStarted ==
     \A tx \in Transactions:
-        (transactions[tx].processed_requests) => CanStart(tx)
+        (transactions[tx].processed_requests > 0) => CanStart(tx)
 
 \* Invariant: If two transactions who are not the same are live, have started (processed requests),
 \* and have overlapping scopes, then they must be read-only.
 OverlappingStartedTxsAreReadOnly ==
     \A tx1, tx2 \in Transactions:
         (tx1 # tx2 
-         /\ Live(tx1) /\ transactions[tx1].processed_requests
-         /\ Live(tx2) /\ transactions[tx2].processed_requests
+         /\ Live(tx1) /\ transactions[tx1].processed_requests > 0
+         /\ Live(tx2) /\ transactions[tx2].processed_requests > 0
          /\ Overlaps(tx1, tx2))
             => (transactions[tx1].mode = "readonly" /\ transactions[tx2].mode = "readonly")
 -----------------------------------------------------------------------------------------
@@ -136,8 +137,9 @@ DefaultTx ==
     [ conn     |-> CHOOSE c \in Connections : TRUE,
         mode      |-> "readonly",
         stores    |-> {},
-        requests  |-> FALSE,
-        processed_requests |-> FALSE,
+        requests  |-> 0,
+        processed_requests |-> 0,
+        handled_requests |-> 0,
         state     |-> "None",
         creation_time |-> 0 ]
 
@@ -217,8 +219,9 @@ CreateUpgradeTransaction(c) ==
                 ![tx] = [conn     |-> c,
                         mode      |-> "versionchange",
                         stores    |-> { s \in Stores : stores[s] },
-                        requests  |-> FALSE,
-                        processed_requests |-> FALSE,
+                        requests  |-> 0,
+                        processed_requests |-> 0,
+                        handled_requests |-> 0,
                         state     |-> "Active",
                         creation_time |-> next_tx_order]
             ]
@@ -260,21 +263,14 @@ CreateTransaction(c, mode, scope) ==
                 ![tx] = [conn     |-> c,
                         mode      |-> mode,
                             stores    |-> scope,
-                                requests  |-> FALSE,
-                                processed_requests |-> FALSE,
+                                requests  |-> 0,
+                                processed_requests |-> 0,
+                                handled_requests |-> 0,
                                 state     |-> "Active",
                                 creation_time |-> next_tx_order]
             ]
     /\ next_tx_order' = next_tx_order + 1
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, pendingDbVersion, connection_queue>>
-
-\* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
-\* Assert: transaction’s state is active.
-AddRequest(tx) ==
-    /\ transactions[tx].state = "Active"
-    /\ ~transactions[tx].requests
-    /\ transactions' = [transactions EXCEPT ![tx].requests = TRUE]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, pendingDbVersion, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
 \*
@@ -287,39 +283,53 @@ ProcessRequest(tx) ==
     /\ CanStart(tx)
     /\ ConnOpen(transactions[tx].conn)
     /\ transactions[tx].state \in {"Active", "Inactive"}
-    /\ transactions[tx].requests
+    /\ transactions[tx].processed_requests < transactions[tx].requests
     /\ transactions' = [transactions EXCEPT
-                ![tx].requests = FALSE,
-                ![tx].processed_requests = TRUE,
+                ![tx].processed_requests = @ + 1,
                 ![tx].state = "Active"
             ]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, pendingDbVersion, connection_queue, next_tx_order>>
+
+\* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
+\* Assert: transaction’s state is active.
+AddRequest(tx) ==
+    /\ transactions[tx].state = "Active"
+    /\ transactions[tx].requests < MaxRequests
+    /\ transactions' = [transactions EXCEPT ![tx].requests = @ + 1]
+    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, pendingDbVersion, connection_queue, next_tx_order>>
+
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \*
 \* "Once the event dispatch is complete, the transaction's state
 \* is set to inactive again".
+\*
+\* Note: AddRequest and Deactivate modeled as two steps,
+\* even though in practice this happens in the same event-loop task.
+\* This does not change anything other than making for easier modelling of adding 
+\* any number of requests while the transaction is active.
 Deactivate(tx) ==
     /\ transactions[tx].state = "Active"
-    /\ transactions' = [transactions EXCEPT ![tx].state = "Inactive"]
+    /\ transactions[tx].handled_requests < transactions[tx].processed_requests
+    /\ transactions' = [transactions EXCEPT 
+            ![tx].state = "Inactive",
+            ![tx].handled_requests = @ + 1]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, pendingDbVersion, connection_queue, next_tx_order>>
 
-\* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
-\*
-\* "The implementation must attempt to commit an inactive transaction
-\* when all requests placed against the transaction have completed...
-\* and no new requests have been placed against the transaction".
+\* <https://w3c.github.io/IndexedDB/#transaction-commit>
+\* The implementation must attempt to commit an inactive transaction 
+\* when all requests placed against the transaction have completed
+\* and their returned results handled, 
+\* no new requests have been placed against the transaction,
+\* and the transaction has not been aborted
 AutoCommit(tx) ==
     /\ transactions[tx].state = "Inactive"
-    /\ ~transactions[tx].requests
+    /\ transactions[tx].requests = transactions[tx].processed_requests
+    /\ transactions[tx].requests = transactions[tx].handled_requests
     /\ transactions' = [transactions EXCEPT ![tx].state = "Committing"]
     /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, pendingDbVersion, connection_queue, next_tx_order>>
 
-\* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
-\*
-\* "An explicit call to commit() will initiate a
-\* transaction/commit" and "When committing, the transaction state is set to
-\* committing".
+\* <https://w3c.github.io/IndexedDB/#commit-a-transaction>
 Commit(tx) ==
     /\ transactions[tx].state \notin {"None", "Committing", "Finished"}
     /\ transactions' = [transactions EXCEPT ![tx].state = "Committing"]
@@ -350,7 +360,7 @@ CommitDone(tx) ==
 \* "A transaction can be aborted at any time before it is
 \* finished".
 Abort(tx) ==
-    /\ transactions[tx].state \notin {"None", "Finished"}
+    /\ transactions[tx].state \notin {"None", "Committing", "Finished"}
     /\ transactions' = [transactions EXCEPT ![tx].state = "Finished"]
     /\ IF transactions[tx].mode = "versionchange"
             THEN
