@@ -2,13 +2,14 @@
 EXTENDS Naturals, Sequences, FiniteSets, TLC
 
 CONSTANTS Stores, Connections, Transactions, Versions, MaxRequests
-VARIABLES transactions, stores, pending_stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order
+VARIABLES transactions, stores, pending_stores, connections, db_version, old_db_version, connection_queue, next_tx_order
 \* TLA+ model of the transaction lifecycle and scheduling rules from:
 \* - <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \* - <https://w3c.github.io/IndexedDB/#transaction-scheduling>
 
-\* Note: by using only a single dbVersion, we do not model multiple databases. 
-Vars == << transactions, stores, pending_stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order >>
+\* Note: by using only a singular `stores` and `db_version` variables,
+\* we do not model multiple databases. 
+Vars == << transactions, stores, pending_stores, connections, db_version, old_db_version, connection_queue, next_tx_order >>
 
 Modes == {"readonly", "readwrite", "versionchange"}
 TxStates == {"None", "Active", "Inactive", "Committing", "Finished"}
@@ -61,11 +62,11 @@ CanStart(tx) ==
 TypeOK ==
     /\ stores \in [Stores -> BOOLEAN]
     /\ pending_stores \in [Stores -> BOOLEAN]
-    /\ dbVersion \in Versions
-    /\ oldDbVersion \in Versions
+    /\ db_version \in Versions
+    /\ old_db_version \in Versions
     /\ connections \in [Connections ->
         [open: BOOLEAN,
-         requestedVersion: Versions,
+         requested_version: Versions,
          closed: BOOLEAN,
          close_pending: BOOLEAN ]]
     /\ connection_queue \in Seq(Connections)
@@ -104,7 +105,7 @@ ActiveUpgradeTxImpliesExclusiveConn ==
 ActiveTransactionImpliesCorrectVersion ==
     \A tx \in Transactions:
         Live(tx) =>
-            \/ (connections[transactions[tx].conn].requestedVersion = dbVersion)
+            \/ (connections[transactions[tx].conn].requested_version = db_version)
 
 \* Invariant: If a transaction has processed requests, it must have been able to start.
 ProcessedRequestsImpliesStarted ==
@@ -134,7 +135,7 @@ DefaultTx ==
 
 DefaultConn ==
     [ open            |-> FALSE,
-        requestedVersion|-> 0,
+        requested_version|-> 0,
         closed          |-> FALSE,
         close_pending   |-> FALSE ]
 
@@ -143,31 +144,31 @@ Init ==
     /\ stores = [s \in Stores |-> FALSE]
     /\ pending_stores = [s \in Stores |-> FALSE]
     /\ connections = [c \in Connections |-> DefaultConn]
-    /\ dbVersion = 0
-    /\ oldDbVersion = 0
+    /\ db_version = 0
+    /\ old_db_version = 0
     /\ connection_queue = <<>>
     /\ next_tx_order = 0
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
-StartOpenConnection(c, requestedVersion) ==
+StartOpenConnection(c, requested_version) ==
     /\ connections[c] = DefaultConn
     /\ ~connections[c].closed
     /\ Len(connection_queue) < Cardinality(Connections)
     /\ connections' = [connections EXCEPT
             ![c] = [open            |-> FALSE,
-                    requestedVersion|-> requestedVersion,
+                    requested_version|-> requested_version,
                     closed          |-> FALSE,
                     close_pending   |-> FALSE]
         ]
     /\ connection_queue' = Append(connection_queue, c)
-    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, oldDbVersion, next_tx_order>>
+    /\ UNCHANGED <<transactions, stores, pending_stores, db_version, old_db_version, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 FinishOpenConnection(c) ==
     /\ Len(connection_queue) > 0
     \* Wait until all previous requests in queue have been processed.
     /\ c = Head(connection_queue)
-    /\ (connections[c].requestedVersion = dbVersion \/ connections[c].closed)
+    /\ (connections[c].requested_version = db_version \/ connections[c].closed)
 	\* <https://w3c.github.io/IndexedDB/#upgrade-a-database>
 	\* Wait for transaction to finish.
     /\ ~HasLiveUpgradeTx(c)
@@ -177,7 +178,7 @@ FinishOpenConnection(c) ==
        THEN connections' = connections
        ELSE connections' = [connections EXCEPT ![c].open = TRUE]
     /\ connection_queue' = Tail(connection_queue)
-    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, oldDbVersion, next_tx_order>>
+    /\ UNCHANGED <<transactions, stores, pending_stores, db_version, old_db_version, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 RejectOpenConnection(c) ==
@@ -186,10 +187,10 @@ RejectOpenConnection(c) ==
     /\ c = Head(connection_queue)
     \* If db’s version is greater than version, 
     \* abort these steps.
-    /\ connections[c].requestedVersion < dbVersion
+    /\ connections[c].requested_version < db_version
     /\ connections' = [connections EXCEPT ![c] = DefaultConn]
     /\ connection_queue' = Tail(connection_queue)
-    /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, oldDbVersion, next_tx_order>>
+    /\ UNCHANGED <<transactions, stores, pending_stores, db_version, old_db_version, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 CreateUpgradeTransaction(c) ==
@@ -201,7 +202,7 @@ CreateUpgradeTransaction(c) ==
 	/\ ~ConnOpen(c)
     \* Wait until all previous requests in queue have been processed.
     /\ c = Head(connection_queue)
-    /\ connections[c].requestedVersion > dbVersion
+    /\ connections[c].requested_version > db_version
     \* Wait until all connections in openConnections are closed.
     /\ \A other \in (Connections \ {c}): ~ConnOpen(other)
     /\ freeTxs # {}
@@ -220,8 +221,8 @@ CreateUpgradeTransaction(c) ==
                 ![c].open = TRUE
             ]
     /\ pending_stores' = stores
-    /\ oldDbVersion' = dbVersion
-    /\ dbVersion' = connections[c].requestedVersion
+    /\ old_db_version' = db_version
+    /\ db_version' = connections[c].requested_version
     /\ next_tx_order' = next_tx_order + 1
     /\ UNCHANGED <<stores, connection_queue>>
 
@@ -230,7 +231,7 @@ StartCloseConnection(c, forced) ==
     /\ ConnOpen(c)
     /\ ~connections[c].close_pending
     /\ IF forced /\ HasLiveUpgradeTx(c)
-       THEN connections' = [connections EXCEPT ![c].close_pending = TRUE, ![c].requestedVersion = oldDbVersion]
+       THEN connections' = [connections EXCEPT ![c].close_pending = TRUE, ![c].requested_version = old_db_version]
        ELSE connections' = [connections EXCEPT ![c].close_pending = TRUE]
     /\ IF forced
        THEN 
@@ -243,12 +244,12 @@ StartCloseConnection(c, forced) ==
             \* https://w3c.github.io/IndexedDB/#abort-an-upgrade-transaction
                THEN 
                     /\ pending_stores' = stores
-                    /\ dbVersion' = oldDbVersion
-                    /\ UNCHANGED <<stores, oldDbVersion>>
+                    /\ db_version' = old_db_version
+                    /\ UNCHANGED <<stores, old_db_version>>
                ELSE 
-                    /\ UNCHANGED <<stores, pending_stores, dbVersion, oldDbVersion>>
+                    /\ UNCHANGED <<stores, pending_stores, db_version, old_db_version>>
        ELSE 
-            /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, oldDbVersion>>
+            /\ UNCHANGED <<transactions, stores, pending_stores, db_version, old_db_version>>
     /\ UNCHANGED <<connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#close-a-database-connection>
@@ -264,7 +265,7 @@ FinishCloseConnection(c) ==
             IF transactions[tx].conn = c 
             THEN DefaultTx 
             ELSE transactions[tx]]
-    /\ UNCHANGED <<stores, pending_stores, dbVersion, oldDbVersion, connection_queue, next_tx_order>>
+    /\ UNCHANGED <<stores, pending_stores, db_version, old_db_version, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-transaction>
 CreateTransaction(c, mode, scope) ==
@@ -288,7 +289,7 @@ CreateTransaction(c, mode, scope) ==
                                 creation_time |-> next_tx_order]
             ]
     /\ next_tx_order' = next_tx_order + 1
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, oldDbVersion, connection_queue>>
+    /\ UNCHANGED <<stores, pending_stores, connections, db_version, old_db_version, connection_queue>>
 
 \* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
 ProcessRequest(tx) ==
@@ -301,7 +302,7 @@ ProcessRequest(tx) ==
                 ![tx].processed_requests = @ + 1,
                 ![tx].state = "Active"
             ]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order>>
+    /\ UNCHANGED <<stores, pending_stores, connections, db_version, old_db_version, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#asynchronously-execute-a-request>
 AddRequest(tx) ==
@@ -309,7 +310,7 @@ AddRequest(tx) ==
     /\ transactions[tx].state = "Active"
     /\ transactions[tx].requests < MaxRequests
     /\ transactions' = [transactions EXCEPT ![tx].requests = @ + 1]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order>>
+    /\ UNCHANGED <<stores, pending_stores, connections, db_version, old_db_version, connection_queue, next_tx_order>>
 
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
@@ -327,7 +328,7 @@ Deactivate(tx) ==
     /\ transactions' = [transactions EXCEPT 
             ![tx].state = "Inactive",
             ![tx].handled_requests = @ + 1]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order>>
+    /\ UNCHANGED <<stores, pending_stores, connections, db_version, old_db_version, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#transaction-commit>
 \* The implementation must attempt to commit an inactive transaction 
@@ -340,13 +341,13 @@ AutoCommit(tx) ==
     /\ transactions[tx].requests = transactions[tx].processed_requests
     /\ transactions[tx].requests = transactions[tx].handled_requests
     /\ transactions' = [transactions EXCEPT ![tx].state = "Committing"]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order>>
+    /\ UNCHANGED <<stores, pending_stores, connections, db_version, old_db_version, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#commit-a-transaction>
 Commit(tx) ==
     /\ transactions[tx].state \notin {"None", "Committing", "Finished"}
     /\ transactions' = [transactions EXCEPT ![tx].state = "Committing"]
-    /\ UNCHANGED <<stores, pending_stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order>>
+    /\ UNCHANGED <<stores, pending_stores, connections, db_version, old_db_version, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#transaction-lifecycle>
 \* "When a transaction is committed or aborted, its state is
@@ -362,10 +363,10 @@ CommitDone(tx) ==
     /\ IF transactions[tx].mode = "versionchange"
             THEN
                 /\ stores' = pending_stores
-                /\ dbVersion' = connections[transactions[tx].conn].requestedVersion
-                /\ UNCHANGED <<pending_stores, oldDbVersion>>
+                /\ db_version' = connections[transactions[tx].conn].requested_version
+                /\ UNCHANGED <<pending_stores, old_db_version>>
             ELSE
-                /\ UNCHANGED <<stores, pending_stores, dbVersion, oldDbVersion>>
+                /\ UNCHANGED <<stores, pending_stores, db_version, old_db_version>>
     /\ UNCHANGED <<connections, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#abort-a-transaction>
@@ -376,11 +377,11 @@ Abort(tx) ==
             THEN
                 \* <https://w3c.github.io/IndexedDB/#abort-an-upgrade-transaction>
                 /\ pending_stores' = stores
-                /\ connections' = [connections EXCEPT ![transactions[tx].conn].requestedVersion = oldDbVersion]
-                /\ dbVersion' = oldDbVersion
-                /\ UNCHANGED <<stores, oldDbVersion>>
+                /\ connections' = [connections EXCEPT ![transactions[tx].conn].requested_version = old_db_version]
+                /\ db_version' = old_db_version
+                /\ UNCHANGED <<stores, old_db_version>>
             ELSE
-                /\ UNCHANGED <<stores, pending_stores, dbVersion, oldDbVersion, connections>>
+                /\ UNCHANGED <<stores, pending_stores, db_version, old_db_version, connections>>
     /\ UNCHANGED <<connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-createobjectstore>
@@ -392,7 +393,7 @@ CreateStore(tx, s) ==
     /\ transactions[tx].state = "Active"
     /\ ~pending_stores[s]
     /\ pending_stores' = [pending_stores EXCEPT ![s] = TRUE]
-    /\ UNCHANGED <<transactions, stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order>>
+    /\ UNCHANGED <<transactions, stores, connections, db_version, old_db_version, connection_queue, next_tx_order>>
 
 \* <https://w3c.github.io/IndexedDB/#dom-idbdatabase-deleteobjectstore>
 DeleteStore(tx, s) ==
@@ -403,7 +404,7 @@ DeleteStore(tx, s) ==
     /\ transactions[tx].state = "Active"
     /\ pending_stores[s]
     /\ pending_stores' = [pending_stores EXCEPT ![s] = FALSE]
-    /\ UNCHANGED <<transactions, stores, connections, dbVersion, oldDbVersion, connection_queue, next_tx_order>>
+    /\ UNCHANGED <<transactions, stores, connections, db_version, old_db_version, connection_queue, next_tx_order>>
 
 \* When all connections went through their open and close cyle: infinite stuttering.
 \* This is a way to avoid deadlock while bounding the spec.
