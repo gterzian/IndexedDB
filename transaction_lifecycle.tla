@@ -117,6 +117,16 @@ ActiveTransactionImpliesCorrectVersion ==
 ProcessedRequestsImpliesStarted ==
     \A tx \in Transactions:
         (transactions[tx].processed_requests) => CanStart(tx)
+
+\* Invariant: If two transactions who are not the same are live, have started (processed requests),
+\* and have overlapping scopes, then they must be read-only.
+OverlappingStartedTxsAreReadOnly ==
+    \A tx1, tx2 \in Transactions:
+        (tx1 # tx2 
+         /\ Live(tx1) /\ transactions[tx1].processed_requests
+         /\ Live(tx2) /\ transactions[tx2].processed_requests
+         /\ Overlaps(tx1, tx2))
+            => (transactions[tx1].mode = "readonly" /\ transactions[tx2].mode = "readonly")
 -----------------------------------------------------------------------------------------
 
 DefaultTx ==
