@@ -13,33 +13,6 @@ Vars == << transactions, stores, pending_stores, connections, dbVersion, pending
 Modes == {"readonly", "readwrite", "versionchange"}
 TxStates == {"None", "Active", "Inactive", "Committing", "Finished"}
 
-TypeOK ==
-    /\ stores \in [Stores -> BOOLEAN]
-    /\ pending_stores \in [Stores -> BOOLEAN]
-    /\ dbVersion \in Versions
-    /\ pendingDbVersion \in Versions
-    /\ connections \in [Connections ->
-        [open: BOOLEAN,
-         pendingUpgrade: BOOLEAN,
-         requestedVersion: Versions,
-         closed: BOOLEAN ]]
-    /\ connection_queue \in Seq(Connections)
-    /\ next_tx_order \in Nat
-    /\ transactions \in [Transactions ->
-        [conn: Connections,
-         mode: Modes,
-         stores: SUBSET Stores,
-         \* We model requests as a simple boolean flag indicating pending work.
-         \* We abstract away the actual list of requests and their side effects on stores
-         \* because the goal of this spec is to model the concurrency of the transaction lifecycle only.
-         requests  : BOOLEAN,
-         \* A flag indicating if any requests have been processed.
-         \* Used to verify the invariant that a transaction must satisfy CanStart
-         \* before it processes any requests.
-         processed_requests: BOOLEAN,
-         state: TxStates,
-         creation_time: Nat ]]
-
 IsCreated(tx) == transactions[tx].state # "None"
 
 Live(tx) == IsCreated(tx) /\ transactions[tx].state # "Finished"
@@ -83,6 +56,36 @@ CanStart(tx) ==
                 /\ Overlaps(other, tx)
         ELSE \* versionchange transactions can always start.
             TRUE
+
+-----------------------------------------------------------------------------------------
+
+\* Type invariant.
+TypeOK ==
+    /\ stores \in [Stores -> BOOLEAN]
+    /\ pending_stores \in [Stores -> BOOLEAN]
+    /\ dbVersion \in Versions
+    /\ pendingDbVersion \in Versions
+    /\ connections \in [Connections ->
+        [open: BOOLEAN,
+         pendingUpgrade: BOOLEAN,
+         requestedVersion: Versions,
+         closed: BOOLEAN ]]
+    /\ connection_queue \in Seq(Connections)
+    /\ next_tx_order \in Nat
+    /\ transactions \in [Transactions ->
+        [conn: Connections,
+         mode: Modes,
+         stores: SUBSET Stores,
+         \* We model requests as a simple boolean flag indicating pending work.
+         \* We abstract away the actual list of requests and their side effects on stores
+         \* because the goal of this spec is to model the concurrency of the transaction lifecycle only.
+         requests  : BOOLEAN,
+         \* A flag indicating if any requests have been processed.
+         \* Used to verify the invariant that a transaction must satisfy CanStart
+         \* before it processes any requests.
+         processed_requests: BOOLEAN,
+         state: TxStates,
+         creation_time: Nat ]]
 
 \* Safety property: A versionchange transaction being live excludes any other live transaction.
 UpgradeTxExcludesOtherLiveTxs ==
