@@ -26,8 +26,6 @@ Symmetry == Permutations(Stores) \cup Permutations(Connections) \cup Permutation
 
 ConnOpen(c) == connections[c].open
 
-ConnPendingUpgrade(c) == connections[c].pendingUpgrade
-
 TxForConn(c) == { tx \in Transactions : Live(tx) /\ transactions[tx].conn = c }
 
 AllTxFinishedForConn(c) ==
@@ -67,7 +65,6 @@ TypeOK ==
     /\ oldDbVersion \in Versions
     /\ connections \in [Connections ->
         [open: BOOLEAN,
-         pendingUpgrade: BOOLEAN,
          requestedVersion: Versions,
          closed: BOOLEAN,
          close_pending: BOOLEAN ]]
@@ -137,7 +134,6 @@ DefaultTx ==
 
 DefaultConn ==
     [ open            |-> FALSE,
-        pendingUpgrade  |-> FALSE,
         requestedVersion|-> 0,
         closed          |-> FALSE,
         close_pending   |-> FALSE ]
@@ -160,7 +156,6 @@ StartOpenConnection(c, requestedVersion) ==
     /\ Len(connection_queue) < Cardinality(Connections)
     /\ connections' = [connections EXCEPT
             ![c] = [open            |-> FALSE,
-                    pendingUpgrade  |-> (requestedVersion > dbVersion),
                     requestedVersion|-> requestedVersion,
                     closed          |-> FALSE,
                     close_pending   |-> FALSE]
@@ -179,8 +174,8 @@ FinishOpenConnection(c) ==
     /\ IF connections[c].closed
        \* If connection was closed, 
        \* return a newly created "AbortError" DOMException and abort these steps.
-       THEN connections' = [connections EXCEPT ![c].pendingUpgrade = FALSE]
-       ELSE connections' = [connections EXCEPT ![c].open = TRUE, ![c].pendingUpgrade = FALSE]
+       THEN connections' = connections
+       ELSE connections' = [connections EXCEPT ![c].open = TRUE]
     /\ connection_queue' = Tail(connection_queue)
     /\ UNCHANGED <<transactions, stores, pending_stores, dbVersion, oldDbVersion, next_tx_order>>
 
@@ -190,7 +185,6 @@ FinishOpenConnection(c) ==
 RejectOpenConnection(c) ==
     /\ Len(connection_queue) > 0
     /\ c = Head(connection_queue)
-    /\ ~connections[c].pendingUpgrade
     /\ connections[c].requestedVersion < dbVersion
     /\ connections' = [connections EXCEPT ![c] = DefaultConn]
     /\ connection_queue' = Tail(connection_queue)
@@ -207,7 +201,7 @@ CreateUpgradeTransaction(c) ==
     /\ Len(connection_queue) > 0
 	/\ ~ConnOpen(c)
     /\ c = Head(connection_queue)
-    /\ ConnPendingUpgrade(c)
+    /\ connections[c].requestedVersion > dbVersion
     /\ \A other \in (Connections \ {c}): ~ConnOpen(other)
     /\ freeTxs # {}
     /\ transactions' = [transactions EXCEPT
