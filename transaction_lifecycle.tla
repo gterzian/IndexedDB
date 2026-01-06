@@ -432,7 +432,8 @@ Next ==
              \/ Commit(tx)
              \/ CommitDone(tx)
              \/ Abort(tx)
-             \/ \E s \in Stores: (CreateStore(tx, s) \/ DeleteStore(tx, s)))
+             \/ \E s \in Stores: \/ CreateStore(tx, s) 
+                                 \/ DeleteStore(tx, s))
     \/ AllClosed
 
 Spec == Init /\ [][Next]_Vars
