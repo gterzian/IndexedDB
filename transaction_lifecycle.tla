@@ -23,6 +23,7 @@ Overlaps(tx1, tx2) == (transactions[tx1].stores \cap transactions[tx2].stores) #
 \* Transactions are ordered by their creation time.
 CreatedBefore(tx1, tx2) == transactions[tx1].creation_time < transactions[tx2].creation_time
 
+\* Note: this is a model checker optimization only.
 Symmetry == Permutations(Stores) \cup Permutations(Connections) \cup Permutations(Transactions)
 
 ConnOpen(c) == connections[c].open
@@ -57,6 +58,7 @@ CanStart(tx) ==
             TRUE
 
 -----------------------------------------------------------------------------------------
+\* Invariants of the spec below.
 
 \* Type invariant.
 TypeOK ==
@@ -151,8 +153,9 @@ Init ==
 
 \* <https://w3c.github.io/IndexedDB/#open-a-database-connection>
 StartOpenConnection(c, requested_version) ==
+    \* Note: each connection can be opened only once,
+    \* in order to reduce the state space.
     /\ connections[c] = DefaultConn
-    /\ ~connections[c].closed
     /\ Len(connection_queue) < Cardinality(Connections)
     /\ connections' = [connections EXCEPT
             ![c] = [open            |-> FALSE,
